@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""
+"Music Credits" 4K transparent (ProRes 4444 alpha), 8 s.
+UI minimaliste type Spotify. Sans only. 3 couleurs : blanc / gris / vert.
+Liste a numeros sur 2 colonnes x 10 : num gris, titre blanc, source grise dessous.
+Header "Music Credits" vert + ligne d'entete "# Title" grise.
+Chaque entree s'assemble depuis une direction aleatoire, ~2.5/s, tres rapide.
+"""
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import os, subprocess, random, json
+
+TIMELINE = json.load(open(os.path.join(os.path.dirname(__file__), "loop_timeline.json")))
+
+OUT_FILE = "/Users/zenray/Downloads/DJI/22 Juin 2026/Videos/Montage/Music Credits.mov"
+SEGDIR   = "/tmp/music_credits"
+W, H = 3840, 2160
+FPS  = 24
+TOTAL = int(FPS * 8.0)            # 192 frames
+
+SANS_BOLD = "/Users/zenray/Library/Fonts/AnthropicSans-Bold.ttf"
+SANS_MED  = "/Users/zenray/Library/Fonts/AnthropicSans-Medium.ttf"
+SANS_REG  = "/Users/zenray/Library/Fonts/AnthropicSans-Regular.ttf"
+
+WHITE = (255, 255, 255)
+GRAY  = (167, 167, 167)
+GRAYD = (125, 125, 125)          # gris plus discret pour les timecodes
+GREEN = (30, 215, 96)            # vert Spotify #1ED760
+
+SHADOW_R = 6
+random.seed(7)
+
+ENTRIES = [
+    ("A World of Contradictions",      "Yugo Kanno · Psycho-Pass"),
+    ("A Journey (A Dream of Flight)",  "Joe Hisaishi · The Wind Rises"),
+    ("Nahoko (An Unexpected Meeting)", "Joe Hisaishi · The Wind Rises"),
+    ("A Shooting Star",                "Joe Hisaishi · The Wind Rises"),
+    ("slow summer eve",                "Kensuke Ushio · Chainsaw Man"),
+    ("Reze",                           "Kensuke Ushio · Chainsaw Man"),
+    ("Sal Blossoms",                   "Kensuke Ushio · The Heike Story"),
+    ("The Beginning",                  "Kensuke Ushio · The Heike Story"),
+    ("Adonis and Amara",               "Ludwig Göransson · Creed II"),
+    ("Under Water",                    "Ludwig Göransson · Creed II"),
+    ("I Will Go To War",               "Ludwig Göransson · Creed II"),
+    ("Ice Cold",                       "Ludwig Göransson · Creed II"),
+    ("Significance (Nothing)",         "Keiichi Okabe · NieR:Automata"),
+    ("Forest Kingdom",                 "Keigo Hoashi · NieR:Automata"),
+    ("Rebirth & Hope",                 "Keigo Hoashi · NieR:Automata"),
+    ("Fortress of Lies",               "Keiichi Okabe · NieR:Automata"),
+    ("The Tower",                      "Keiichi Okabe · NieR:Automata"),
+    ("Atsu's Theme",                   "Toma Otowa · Ghost of Yōtei"),
+    ("CRISIS CORE Theme - Succession", "Takeharu Ishimoto · Crisis Core FF7"),
+    ("Gray Heron III",                 "Joe Hisaishi · The Boy and the Heron"),
+]
+
+_fc = {}
+def gf(p, s):
+    k=(p,s)
+    if k not in _fc: _fc[k]=ImageFont.truetype(p,s)
+    return _fc[k]
+
+def ease_out_quint(t):
+    t=max(0.0,min(1.0,t)); return 1-(1-t)**5
+def smoothstep(t):
+    t=max(0.0,min(1.0,t)); return t*t*(3-2*t)
+
+def draw_left(canvas, text, x, baseline, font, color, alpha):
+    if alpha<=0 or not text.strip(): return
+    bb=font.getbbox(text, anchor="ls")
+    pad=SHADOW_R*2+4
+    lw=int(bb[2]-bb[0])+pad*2; lh=int(bb[3]-bb[1])+pad*2
+    lx=pad-bb[0]; ly=pad-bb[1]
+    shd=Image.new("RGBA",(lw,lh),(0,0,0,0))
+    ImageDraw.Draw(shd).text((lx,ly),text,font=font,fill=(0,0,0,int(alpha*0.7)),anchor="ls")
+    shd=shd.filter(ImageFilter.GaussianBlur(SHADOW_R))
+    txt=Image.new("RGBA",(lw,lh),(0,0,0,0))
+    ImageDraw.Draw(txt).text((lx,ly),text,font=font,fill=(*color,alpha),anchor="ls")
+    comb=Image.alpha_composite(shd,txt)
+    dx=int(x+bb[0]-pad); dy=int(baseline+bb[1]-pad)
+    cx,cy=max(0,dx),max(0,dy)
+    cr=comb.crop((cx-dx,cy-dy,min(comb.width,W-dx),min(comb.height,H-dy)))
+    if cr.width>0 and cr.height>0: canvas.alpha_composite(cr,(cx,cy))
+
+def draw_right(canvas, text, xright, baseline, font, color, alpha):
+    draw_left(canvas, text, xright-font.getlength(text), baseline, font, color, alpha)
+
+# ── Layout type Spotify : 2 colonnes ──
+ROWS=10
+COL_X=[360, 2060]          # bord gauche de chaque colonne (zone numero)
+NUM_W=90                   # largeur reservee au numero
+HEAD_Y=320
+TOP_Y=560
+ROW_H=152
+
+DIRS=['left','right','top','bottom']
+items=[]
+for i,(title,src) in enumerate(ENTRIES):
+    col=i//ROWS; row=i%ROWS
+    x0=COL_X[col]
+    ty=TOP_Y+row*ROW_H
+    items.append({'n':i+1,'title':title,'src':src,'x0':x0,'ty':ty,
+                  'dir':random.choice(DIRS)})
+
+STEP=7; ANIM_F=6; OFFSET=240
+
+def main():
+    os.makedirs(SEGDIR,exist_ok=True)
+    for f in os.listdir(SEGDIR): os.remove(f"{SEGDIR}/{f}")
+    f_head =gf(SANS_BOLD,96)
+    f_num  =gf(SANS_REG,38)
+    f_title=gf(SANS_MED,46)
+    f_src  =gf(SANS_REG,33)
+    f_time =gf(SANS_REG,27)
+
+    for frame in range(TOTAL):
+        img=Image.new("RGBA",(W,H),(0,0,0,0))
+        d=ImageDraw.Draw(img)
+        he=frame
+        ha=int(255*smoothstep(min(he/ANIM_F,1.0))) if he>=0 else 0
+        # header vert (pas d'entetes # / Title)
+        draw_left(img,"Music Credits",COL_X[0],HEAD_Y,f_head,GREEN,ha)
+        # entrees
+        for it in items:
+            start=ANIM_F+2+(it['n']-1)*STEP
+            e=frame-start
+            if e<0: continue
+            if e>=ANIM_F: px=py=0; a=255
+            else:
+                raw=e/ANIM_F; tp=ease_out_quint(raw); a=int(255*smoothstep(raw))
+                dd=it['dir']
+                ox=(-OFFSET if dd=='left' else OFFSET if dd=='right' else 0)
+                oy=(-OFFSET if dd=='top'  else OFFSET if dd=='bottom' else 0)
+                px=ox*(1-tp); py=oy*(1-tp)
+            x0=it['x0']+px
+            tx=x0+NUM_W
+            draw_right(img,str(it['n']),x0+NUM_W-30,it['ty']+py,    f_num,  GRAY, a)
+            draw_left (img,it['title'], tx,         it['ty']+py,    f_title,WHITE,a)
+            draw_left (img,it['src'],   tx,         it['ty']+48+py, f_src,  GRAY, a)
+            times=" · ".join(TIMELINE.get(str(it['n']), []))
+            draw_left (img,times,       tx,         it['ty']+88+py, f_time, GRAYD,a)
+        img.save(f"{SEGDIR}/f_{frame:04d}.png")
+
+    subprocess.run(["ffmpeg","-y","-r",str(FPS),"-i",f"{SEGDIR}/f_%04d.png",
+        "-c:v","prores_ks","-profile:v","4444","-pix_fmt","yuva444p10le",OUT_FILE],
+        check=True,capture_output=True)
+    print(f"-> {OUT_FILE}  ({TOTAL/FPS:.2f}s)")
+
+if __name__=="__main__":
+    main()
