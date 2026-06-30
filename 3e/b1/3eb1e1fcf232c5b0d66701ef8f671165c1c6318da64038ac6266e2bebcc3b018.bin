@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""
+Boucle BGM du montage 22 juin -> "BGM Loop.mp3" (320 kbps).
+
+- Duree EXACTE : 1:55:52 = 6952.000 s.
+- Lit toutes les pistes "NN - *.wav" de SRC, dans l'ordre numerique, et les
+  enchaine en boucle (01,02,...,N,01,02,...).
+- La piste-frontiere (celle qui depasserait la cible) est rognee avec un
+  fade-out pour tomber pile.
+- Se TERMINE par Rebirth & Hope EN ENTIER, colle a la fin (en plus de sa
+  position normale dans la rotation). Le remplissage reserve donc exactement
+  sa duree avant de l'ajouter -> fin propre sur ce morceau.
+
+Usage :
+  python3 build_bgm_loop_montage.py        # build + encode mp3
+  python3 build_bgm_loop_montage.py --dry  # affiche seulement le plan
+"""
+import os, sys, glob, subprocess, json
+
+SRC    = "/Users/zenray/Downloads/DJI/22 Juin 2026/Videos/Montage/BGM"
+OUT    = "/Users/zenray/Downloads/DJI/22 Juin 2026/Videos/Montage/BGM Loop.mp3"
+SEGDIR = "/tmp/bgm_loop_montage"
+CLOSER = "15 - Rebirth & Hope.wav"     # morceau de cloture (colle en entier a la fin)
+TARGET = 1*3600 + 55*60 + 52           # 6952.000 s = 1:55:52
+SR, CH = 48000, 2
+DRY = "--dry" in sys.argv
+
+
+def dur(p):
+    return float(subprocess.run(
+        ["ffprobe","-v","error","-show_entries","format=duration","-of","csv=p=0",p],
+        capture_output=True, text=True).stdout.strip())
+
+# Lit musical sous voix podcast (-16 LUFS) : on cale chaque piste a -28 LUFS
+# (~12 LU sous la voix), bed uniforme et qui ne mange pas la parole.
+LOUDNORM = "loudnorm=I=-28:TP=-2:LRA=11"
+
+def reformat(src, out):
+    subprocess.run(["ffmpeg","-y","-i",src,"-af",LOUDNORM,
+                    "-ar",str(SR),"-ac",str(CH),"-c:a","pcm_s24le",out],
+                   check=True, capture_output=True)
+
+def trim_seg(src, out, L):
+    fade = min(1.0, max(0.1, L))          # fade-out propre sur le bout rogne
+    af = f"{LOUDNORM},afade=t=out:st={max(0.0,L-fade):.3f}:d={fade:.3f}"
+    subprocess.run(["ffmpeg","-y","-t",f"{L:.3f}","-i",src,"-af",af,
+                    "-ar",str(SR),"-ac",str(CH),"-c:a","pcm_s24le",out],
+                   check=True, capture_output=True)
+
+def fmt(s):
+    return f"{int(s//3600):d}:{int(s%3600//60):02d}:{s%60:06.3f}"
+
+
+def main():
+    order = sorted(os.path.basename(p) for p in glob.glob(f"{SRC}/[0-9]*.wav"))
+    if not order:
+        print("Aucune piste NN - *.wav dans SRC"); return
+    durs = {n: dur(f"{SRC}/{n}") for n in order}
+    R = durs[CLOSER]
+    budget = TARGET - R                    # on reserve la duree pleine du closer
+
+    print(f"Pistes ({len(order)}) :")
+    for n in order:
+        print(f"  {n:50s} {durs[n]:7.3f}s")
+    print(f"\nCible={fmt(TARGET)}  closer={CLOSER} ({R:.3f}s)  budget remplissage={fmt(budget)}\n")
+
+    # ── Remplissage en boucle jusqu'a budget, derniere piste rognee ──
+    plan = []          # (name, length, trimmed)
+    acc, i = 0.0, 0
+    while acc < budget - 0.0005:
+        name = order[i % len(order)]
+        d = durs[name]
+        if acc + d <= budget + 0.0005:
+            plan.append((name, d, False)); acc += d
+        else:
+            plan.append((name, budget - acc, True)); acc = budget; break
+        i += 1
+    # ── Cloture : Rebirth & Hope en entier ──
+    plan.append((CLOSER, R, False))
+    total = acc + R
+
+    # ── Export timeline : pour chaque piste (numero NN), tous les timecodes
+    #    de depart dans la boucle (musique demarre a 0:00) ──
+    def hms(t):
+        t = int(round(t)); h, m, s = t//3600, t%3600//60, t%60
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+    timeline = {}
+    t = 0.0
+    for name, L, _ in plan:
+        num = int(name[:2])
+        timeline.setdefault(num, []).append(hms(t))
+        t += L
+    if "--timeline" in sys.argv:
+        out_json = os.path.join(os.path.dirname(__file__), "loop_timeline.json")
+        json.dump(timeline, open(out_json, "w"), indent=2)
+        print(f"timeline -> {out_json}")
+        for k in sorted(timeline): print(f"  {k:02d}: {' · '.join(timeline[k])}")
+        return
+
+    print(f"Segments remplissage : {len(plan)-1}  + closer")
+    print(f"  ...")
+    for name, L, trim in plan[-4:]:
+        print(f"  {L:7.3f}s  {name}{'  [ROGNE]' if trim else ''}")
+    print(f"\nTOTAL prevu = {fmt(total)}  (cible {fmt(TARGET)}, ecart {total-TARGET:+.3f}s)")
+    if DRY:
+        print("\n[--dry] pas d'encodage."); return
+
+    # ── Rendu des segments ──
+    os.makedirs(SEGDIR, exist_ok=True)
+    for f in os.listdir(SEGDIR): os.remove(f"{SEGDIR}/{f}")
+    seg_files = []
+    for k, (name, L, trim) in enumerate(plan):
+        out = f"{SEGDIR}/{k:04d}.wav"
+        if trim: trim_seg(f"{SRC}/{name}", out, L)
+        else:    reformat(f"{SRC}/{name}", out)
+        seg_files.append(out)
+
+    listf = f"{SEGDIR}/list.txt"
+    open(listf, "w").write("".join(f"file '{s}'\n" for s in seg_files))
+    # concat -> MP3 320 kbps directement
+    subprocess.run(["ffmpeg","-y","-f","concat","-safe","0","-i",listf,
+                    "-c:a","libmp3lame","-b:a","320k", OUT], check=True, capture_output=True)
+    print(f"\nFINAL={fmt(dur(OUT))}  -> {OUT}")
+
+
+if __name__ == "__main__":
+    main()
